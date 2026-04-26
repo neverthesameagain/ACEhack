@@ -1,4 +1,4 @@
-"""Hugging Face Space entrypoint for ACE++ Option B."""
+"""Hugging Face Space entrypoint for EIE Economic Intelligence Engine."""
 
 from __future__ import annotations
 

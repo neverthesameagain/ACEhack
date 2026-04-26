@@ -1,4 +1,4 @@
-"""Shared LLM -> JSON -> action policy utilities for ACE++.
+"""Shared LLM -> JSON -> action policy utilities for EIE.
 
 The demo and GRPO notebook both use this module so prompt format, generation,
 JSON extraction, validation, and fallback behavior stay identical.

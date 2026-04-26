@@ -1,4 +1,4 @@
-"""Decoupled rewards for ACE++ Option B.
+"""Decoupled rewards for EIE Economic Intelligence Engine.
 
 The reward is intentionally decomposed so a policy cannot improve by only
 gaming bid size. Inference, action quality, formatting, personality alignment,

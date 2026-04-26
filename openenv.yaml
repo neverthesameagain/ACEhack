@@ -1,9 +1,10 @@
-name: ace-plus-plus
+name: eie-economic-intelligence-engine
 version: "2.0.0"
 description: >
-  Adaptive multi-agent economic simulation where natural language events change
-  macroeconomic conditions, agents infer hidden regimes, and trust/opponent
-  models drive strategic learning over repeated interaction.
+  EIE Economic Intelligence Engine: Learning Decisions in Dynamic Economic and
+  Geopolitical Systems. Natural language events change macroeconomic conditions,
+  agents infer hidden regimes, and trust/opponent models drive strategic learning
+  over repeated interaction.
 entry: openenv_ace:ACEOpenMultiAgentEnv
 app_entry: app.py
 theme: multi-agent

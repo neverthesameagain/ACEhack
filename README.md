@@ -1,5 +1,5 @@
 ---
-title: ACE++ Adaptive Coalition Economy
+title: EIE Economic Intelligence Engine
 emoji: 🧠
 colorFrom: indigo
 colorTo: purple
@@ -10,9 +10,11 @@ app_file: app.py
 pinned: false
 ---
 
-# ACE++ Adaptive Coalition Economy
+# EIE Economic Intelligence Engine
 
-ACE++ is a live multi-agent economic simulation where natural language events reshape the world, agents reason under uncertainty, and social dynamics drive adaptation.
+Learning Decisions in Dynamic Economic and Geopolitical Systems
+
+EIE Economic Intelligence Engine is a live multi-agent economic simulation where natural language events reshape the world, agents reason under uncertainty, and social dynamics drive adaptation.
 
 ## Demo Flow
 

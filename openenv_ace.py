@@ -1,4 +1,4 @@
-"""OpenEnv-compatible adapter for the current ACE++ Option B environment.
+"""OpenEnv-compatible adapter for the current EIE Economic Intelligence Engine environment.
 
 This file is intentionally small: Hugging Face Spaces launches `app.py`, while
 OpenEnv-style evaluators can import `ACEOpenMultiAgentEnv` from this module.

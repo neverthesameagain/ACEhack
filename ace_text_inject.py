@@ -1,4 +1,4 @@
-"""Natural language event injection for ACE++ Option B."""
+"""Natural language event injection for EIE Economic Intelligence Engine."""
 
 from __future__ import annotations
 

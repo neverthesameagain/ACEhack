@@ -1,4 +1,4 @@
-"""Adaptive company agents for ACE++ Option B."""
+"""Adaptive company agents for EIE Economic Intelligence Engine."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class AgentProfile:
     )
 
     def system_prompt(self, world_state_str: str) -> str:
-        return f"""You are {self.name}, a {self.company_type} in ACE++.
+        return f"""You are {self.name}, a {self.company_type} in EIE.
 
 Objective: {self.primary_objective}
 
@@ -539,7 +539,7 @@ AGENT_PROFILES = [
     ),
     AgentProfile(
         agent_id=3,
-        name="CentralBank of ACE",
+        name="CentralBank of EIE",
         company_type="Central Bank / Regulator",
         emoji="🏦",
         primary_objective="Maintain market stability, control inflation, and prevent systemic risk",

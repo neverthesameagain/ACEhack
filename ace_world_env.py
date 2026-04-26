@@ -1,4 +1,4 @@
-"""Structured economic world and multi-agent simulator for ACE++ Option B."""
+"""Structured economic world and multi-agent simulator for EIE Economic Intelligence Engine."""
 
 from __future__ import annotations
 
