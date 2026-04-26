@@ -1,4 +1,4 @@
-# EIE: Economic INtelligence Engine
+# EIE: Economic Intelligence Engine
 
 Most economic simulations start with numbers.
 
