@@ -1,4 +1,4 @@
-# EIE: Teaching AI Agents to Read the World Before They Act
+# EIE: Economic INtelligence Engine
 
 Most economic simulations start with numbers.
 
