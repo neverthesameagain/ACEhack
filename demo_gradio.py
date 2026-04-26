@@ -1768,7 +1768,7 @@ def build_ui():
 <div class="hero">
   <h1>EIE</h1>
   <p>Economic Intelligence Engine: Learning Decisions in Dynamic Economic and Geopolitical Systems</p>
-  <div class="mode-pill">Event Reported → LLM Interprets → World Change → Agents Act → Outcome</div>
+  <div class="mode-pill">Event Reported → LLM Interprets → World Change → Agents Act → The world and the agents change, yet again :)</div>
 </div>
 """
         )
