@@ -11,7 +11,12 @@ import os
 from typing import Any, Callable
 
 from ace_reward import ACTIONS
-from ace_text_inject import call_groq_chat_completion
+from ace_text_inject import (
+    call_groq_chat_completion,
+    call_huggingface_chat_completion,
+    get_groq_api_key,
+    get_hf_user_token,
+)
 
 ROUND_TYPES = {"competitive", "cooperative", "resource"}
 VALID_ACTIONS = set(ACTIONS)
@@ -144,10 +149,19 @@ def generate_action(prompt: str, model: Any = None, tokenizer: Any = None) -> st
             text = text[len(prompt) :]
         return text.strip()
 
-    if os.getenv("LLM_PROVIDER", "fallback").lower().strip() == "groq" and os.getenv("GROQ_API_KEY"):
+    prov = os.getenv("LLM_PROVIDER", "fallback").lower().strip()
+    if prov == "groq" and get_groq_api_key():
         return call_groq_chat_completion(
             messages=[{"role": "user", "content": prompt}],
             model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            temperature=0.2,
+            max_tokens=160,
+        ).strip()
+    if prov == "huggingface" and get_hf_user_token():
+        m = os.getenv("HF_INFERENCE_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+        return call_huggingface_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=m,
             temperature=0.2,
             max_tokens=160,
         ).strip()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
 import urllib.request
 from copy import deepcopy
 from pathlib import Path
@@ -21,10 +22,57 @@ def load_local_env(path: str = ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not value:
+            # Never bind an empty .env value — that can mask Space secrets or block alias fill-in.
+            continue
+        os.environ.setdefault(key, value)
 
 
 load_local_env()
+
+# Default for Hugging Face Inference (serverless). Override with HF_INFERENCE_MODEL in env / Space.
+DEFAULT_HF_INFERENCE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+
+# Groq: HF Spaces and local setups sometimes use a different env name — normalize to GROQ_API_KEY.
+GROQ_KEY_ALIASES: tuple[str, ...] = (
+    "GROQ_API_KEY",
+    "GROQ_KEY",
+    "GROQ_SECRET",
+    "GROQ_TOKEN",
+    "GROQ",
+)
+
+
+def get_groq_api_key() -> str | None:
+    """Return a usable Groq API key, checking common variable names and trimming whitespace."""
+    for name in GROQ_KEY_ALIASES:
+        val = os.getenv(name)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return None
+
+
+def ensure_groq_key_in_environ() -> None:
+    """If only an alias (e.g. GROQ) is set, copy into GROQ_API_KEY for SDKs that expect that name."""
+    if os.environ.get("GROQ_API_KEY", "").strip():
+        return
+    key = get_groq_api_key()
+    if key:
+        os.environ["GROQ_API_KEY"] = key
+
+
+ensure_groq_key_in_environ()
+
+
+def get_hf_user_token() -> str | None:
+    """Token for Hugging Face Hub / Inference. Spaces often expose HF_TOKEN; accept common aliases."""
+    for key in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGINGFACE_API_TOKEN", "HUGGINGFACE_TOKEN"):
+        val = os.getenv(key)
+        if val and str(val).strip():
+            return str(val).strip()
+    return None
 
 
 INJECT_SYSTEM_PROMPT = """You are an economic analyst AI.
@@ -143,11 +191,19 @@ def parse_event_payload(
 
     raw = ""
     provider = (provider or os.getenv("LLM_PROVIDER", "fallback")).lower().strip()
-    cache_key = (provider, os.getenv("GROQ_MODEL" if provider == "groq" else "ANTHROPIC_MODEL", model), normalized_event)
+    if provider == "groq":
+        _cache_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    elif provider == "huggingface":
+        _cache_model = os.getenv("HF_INFERENCE_MODEL", DEFAULT_HF_INFERENCE_MODEL)
+    elif provider == "anthropic":
+        _cache_model = os.getenv("ANTHROPIC_MODEL", model)
+    else:
+        _cache_model = str(model)
+    cache_key = (provider, _cache_model, normalized_event)
     if not debug and cache_key in EVENT_CACHE:
         return deepcopy(EVENT_CACHE[cache_key])
 
-    if provider == "groq" and os.getenv("GROQ_API_KEY"):
+    if provider == "groq" and get_groq_api_key():
         try:
             raw = call_groq_chat_completion(
                 [
@@ -158,6 +214,23 @@ def parse_event_payload(
                     },
                 ],
                 model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+                temperature=0.15,
+                max_tokens=360,
+            )
+        except Exception:
+            raw = ""
+    elif provider == "huggingface" and get_hf_user_token():
+        try:
+            hf_model = os.getenv("HF_INFERENCE_MODEL", DEFAULT_HF_INFERENCE_MODEL)
+            raw = call_huggingface_chat_completion(
+                [
+                    {"role": "system", "content": INJECT_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": f"Current world state:\n{world_state_str}\n\nEvent: {event_text}",
+                    },
+                ],
+                model=hf_model,
                 temperature=0.15,
                 max_tokens=360,
             )
@@ -214,10 +287,16 @@ def call_groq_chat_completion(
     temperature: float,
     max_tokens: int,
 ) -> str:
-    """Call Groq chat completions with SDK if available, otherwise plain HTTPS."""
-    api_key = os.getenv("GROQ_API_KEY")
+    """Call Groq chat completions with SDK if available, otherwise plain HTTPS.
+
+    On network/API errors, returns an empty string so callers can fall back to
+    structured policies instead of crashing the UI.
+    """
+    ensure_groq_key_in_environ()
+    api_key = get_groq_api_key()
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY is not configured.")
+        return ""
+
     try:
         from groq import Groq
 
@@ -230,6 +309,8 @@ def call_groq_chat_completion(
         )
         return response.choices[0].message.content or ""
     except ModuleNotFoundError:
+        pass
+    except Exception:
         pass
 
     payload = {
@@ -247,9 +328,41 @@ def call_groq_chat_completion(
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    return str(body["choices"][0]["message"]["content"])
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        return str(body["choices"][0]["message"]["content"] or "")
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, KeyError, json.JSONDecodeError, IndexError):
+        return ""
+
+
+def call_huggingface_chat_completion(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """Chat completion via Hugging Face Inference (same token as HF Spaces: HF_TOKEN)."""
+    token = get_hf_user_token()
+    if not token:
+        raise RuntimeError("No Hugging Face token (set HF_TOKEN or HUGGINGFACE_HUB_TOKEN).")
+    try:
+        from huggingface_hub import InferenceClient
+    except ModuleNotFoundError as err:
+        raise RuntimeError("Install huggingface_hub to use Hugging Face Inference.") from err
+
+    try:
+        client = InferenceClient(model=model, token=token)
+        out = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return str(out.choices[0].message.content or "")
+    except Exception:
+        return ""
 
 
 def describe_impact(deltas: dict[str, float], event_text: str, causal_reasoning: str = "") -> str:

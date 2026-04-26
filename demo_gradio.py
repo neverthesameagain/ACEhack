@@ -13,6 +13,7 @@ import copy
 import json
 import os
 import random
+import time
 import statistics
 from collections import Counter
 from html import escape
@@ -35,7 +36,11 @@ def load_local_env(path: str = ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not value:
+            continue
+        os.environ.setdefault(key, value)
 
 
 load_local_env()
@@ -43,24 +48,37 @@ load_local_env()
 from ace_agents import AgentProfile
 from ace_llm_policy import build_action_prompt, extract_first_valid_json, llm_policy, normalize_action
 from ace_reward import ACTIONS
-from ace_text_inject import call_groq_chat_completion, describe_impact
+from ace_text_inject import (
+    call_groq_chat_completion,
+    call_huggingface_chat_completion,
+    describe_impact,
+    ensure_groq_key_in_environ,
+    get_groq_api_key,
+    get_hf_user_token,
+)
 from ace_world_env import ACEWorldEnv
+
+ensure_groq_key_in_environ()
 
 
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-PROVIDERS = {"fallback", "groq", "anthropic"}
-UI_PROVIDER_CHOICES = ["fallback", "groq"]
+PROVIDERS = {"fallback", "groq", "anthropic", "huggingface"}
+UI_PROVIDER_CHOICES = ["fallback", "groq", "huggingface"]
 PROVIDER_KEY_ENV = {
     "groq": "GROQ_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
 }
+DEFAULT_HF_INFERENCE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 PERFECT_DEMO_EVENT = "oil crisis hits Middle East"
-PRESET_EVENTS = [
-    PERFECT_DEMO_EVENT,
-    "global cooperation agreement signed",
-    "major food supply chain disruption",
-]
+# Quick demo: label -> event text
+DEMO_QUICK_EVENTS: dict[str, str] = {
+    "oil_crisis": PERFECT_DEMO_EVENT,
+    "trade_war": "US-China trade war escalates, tariffs and uncertainty rise",
+    "peace": "global cooperation agreement signed",
+}
+# Mode names (unchanged; used in logic and shown in the UI)
+MODE_CHOICES: list[str] = ["Agent-Based RL", "LLM-Based RL"]
 TRAINING_SCENARIOS = {
     "oil_crisis": "Oil crisis disrupts shipping, raises energy costs, and increases geopolitical risk",
     "peace_scenario": "Peace agreement lowers trade tension, improves cooperation, and stabilizes supply chains",
@@ -68,9 +86,77 @@ TRAINING_SCENARIOS = {
 COOP_ACTIONS = {"propose_alliance", "accept_alliance", "execute_contract"}
 BETRAY_ACTIONS = {"betray"}
 AGGRESSIVE_ACTIONS = {"challenge", "betray", "submit_bid"}
+
+SOLUTION_PIPELINE_HTML = """
+<div class="solution-pipeline solution-pipeline--lower">
+  <span class="sp-title">Our solution flow</span>
+  <div class="sp-flow">
+    <div class="sp-box">
+      <b>1 · Ingest</b><br/>
+      You enter a real-world event<br/>
+      <em>e.g. &ldquo;oil crisis hits Middle East&rdquo;</em>
+    </div>
+    <span class="sp-arrow">&rarr;</span>
+    <div class="sp-box">
+      <b>2 · Parse</b><br/>
+      LLM / fallback extracts structured signals<br/>
+      <em>event type, sectors, causal factors</em>
+    </div>
+    <span class="sp-arrow">&rarr;</span>
+    <div class="sp-box">
+      <b>3 · Translate</b><br/>
+      Convert to economic deltas<br/>
+      <em>oil &uarr;, inflation &uarr;, volatility &uarr;</em>
+    </div>
+    <span class="sp-arrow">&rarr;</span>
+    <div class="sp-box">
+      <b>4 · Update World</b><br/>
+      Global state shifts &amp; hidden pressures form<br/>
+      <em>competitive / cooperative / resource</em>
+    </div>
+    <span class="sp-arrow">&rarr;</span>
+    <div class="sp-box">
+      <b>5 · Observe</b><br/>
+      Agents see noisy, partial signals<br/>
+      <em>no one sees the full picture</em>
+    </div>
+    <span class="sp-arrow">&rarr;</span>
+    <div class="sp-box">
+      <b>6 · Decide</b><br/>
+      Agents act via RL or LLM strategies<br/>
+      <em>bids, alliances, challenges</em>
+    </div>
+    <span class="sp-arrow">&rarr;</span>
+    <div class="sp-box">
+      <b>7 · Interact</b><br/>
+      Social dynamics unfold<br/>
+      <em>cooperation, betrayal, trust shifts</em>
+    </div>
+    <span class="sp-arrow">&rarr;</span>
+    <div class="sp-box">
+      <b>8 · Reward</b><br/>
+      Actions are evaluated<br/>
+      <em>profit, risk, alignment, behavior</em>
+    </div>
+    <span class="sp-arrow">&rarr;</span>
+    <div class="sp-box">
+      <b>9 · Learn</b><br/>
+      Agents update memory &amp; Q-values<br/>
+      <em>strategy evolves over time</em>
+    </div>
+    <span class="sp-arrow">&rarr;</span>
+    <div class="sp-box">
+      <b>10 · Explain</b><br/>
+      UI reveals what happened &amp; why<br/>
+      <em>world state, reasoning, outcomes</em>
+    </div>
+  </div>
+</div>
+"""
+
 APP_CSS = """
 :root {
-  --ace-bg: #070b1a;
+  --ace-bg: #000000;
   --ace-card: rgba(255, 255, 255, 0.08);
   --ace-card-strong: rgba(255, 255, 255, 0.14);
   --ace-border: rgba(255, 255, 255, 0.16);
@@ -80,52 +166,70 @@ APP_CSS = """
   --ace-purple: #a78bfa;
   --ace-pink: #fb7185;
 }
-
+html, body {
+  background: #020617 !important;
+}
+.gradio-container {
+  background: #020617 !important;
+  color: var(--ace-text) !important;
+}
+.gr-box, .gr-form, .gr-panel, .block {
+  background: #020617 !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+.sp-box, .agent-card, .metric-card {
+  background: #020617 !important;
+  border: none !important;
+  border-radius: 12px;
+}
 body, .gradio-container {
-  background:
-    radial-gradient(circle at 8% 8%, rgba(34, 211, 238, 0.24), transparent 28%),
-    radial-gradient(circle at 88% 12%, rgba(167, 139, 250, 0.28), transparent 28%),
-    radial-gradient(circle at 50% 95%, rgba(251, 113, 133, 0.16), transparent 30%),
-    linear-gradient(180deg, #070b1a 0%, #0f172a 48%, #111827 100%) !important;
+  background: #020617 !important;
   color: var(--ace-text) !important;
 }
 
 .gradio-container {
-  max-width: 1180px !important;
-  margin: auto;
+  max-width: 100vw !important;
+  width: 100vw !important;
+  margin: 0 !important;
+  padding: 0 24px !important;
 }
 
 .block, .form, .panel, .gr-box, .gr-form, .gr-panel {
-  border-color: var(--ace-border) !important;
+  border: none !important;
+  box-shadow: none !important;
 }
 
 .hero {
   position: relative;
   overflow: hidden;
   padding: 30px 34px;
-  border-radius: 30px;
+  border-radius: 20px;
   color: white;
-  background:
-    linear-gradient(135deg, rgba(15, 23, 42, 0.96) 0%, rgba(37, 99, 235, 0.86) 50%, rgba(124, 58, 237, 0.88) 100%);
-  border: 1px solid rgba(255,255,255,0.22);
-  box-shadow: 0 24px 80px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.22);
-  backdrop-filter: blur(18px);
+  background: #020617;
+  border: none;
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .hero::after {
-  content: "";
-  position: absolute;
-  width: 320px;
-  height: 320px;
-  right: -110px;
-  top: -130px;
-  background: radial-gradient(circle, rgba(255,255,255,0.28), transparent 92%);
+  content: none;
+  display: none;
 }
 
 .hero p {
   margin: 0;
   max-width: 980px;
   color: rgba(255,255,255,0.88);
+  line-height: 1.5;
+}
+.hero p.hero-line2,
+.hero .hero-line2 {
+  margin-top: 10px;
+  max-width: 58ch;
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.72);
+  line-height: 1.45;
 }
 
 .hero h1 {
@@ -133,6 +237,13 @@ body, .gradio-container {
   font-weight: 800;
   margin: 0 0 8px 0;
   letter-spacing: -0.045em;
+}
+.hero .hero-eie-title {
+  font-size: clamp(1.35rem, 2.5vw, 1.75rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: rgba(255, 255, 255, 0.97);
+  display: inline;
 }
 
 .mode-pill {
@@ -142,8 +253,8 @@ body, .gradio-container {
   margin-top: 12px;
   padding: 8px 12px;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.55);
-  border: 1px solid rgba(255,255,255,0.16);
+  background: #0f172a;
+  border: none;
   color: #bfdbfe;
   font-size: 13px;
   font-weight: 750;
@@ -152,22 +263,312 @@ body, .gradio-container {
 .command-shell {
   margin: 20px 0 24px;
   padding: 18px;
-  border-radius: 28px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.13), rgba(255,255,255,0.06));
-  border: 1px solid rgba(255,255,255,0.18);
-  box-shadow: 0 22px 70px rgba(2, 6, 23, 0.32);
-  backdrop-filter: blur(18px);
+  border-radius: 20px;
+  background: #020617;
+  border: none;
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .story-stage {
   padding: 22px;
-  border-radius: 28px;
-  background:
-    radial-gradient(circle at 15% 0%, rgba(56, 189, 248, 0.16), transparent 32%),
-    linear-gradient(180deg, rgba(30, 41, 59, 0.74), rgba(15, 23, 42, 0.72));
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  box-shadow: 0 24px 75px rgba(2, 6, 23, 0.28);
+  border-radius: 20px;
+  background: #020617;
+  border: none;
+  box-shadow: none;
 }
+.story-stage.story-hero {
+  max-width: 1000px;
+  margin: 0 auto 8px;
+  padding: 28px 26px 24px;
+  border: none;
+}
+.story-hero .flow-strip {
+  gap: 16px;
+}
+.story-hero .flow-step {
+  padding: 20px 20px 18px;
+  min-height: 104px;
+}
+.story-hero .flow-step b {
+  font-size: 1.05rem;
+  letter-spacing: 0.02em;
+}
+.story-hero .flow-step span {
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: #e2e8f0;
+}
+.run-status {
+  max-width: 1000px;
+  margin: 0 auto 12px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: #020617;
+  border: none;
+  font-size: 13px;
+  color: #e2e8f0;
+}
+.run-status--compact {
+  padding: 6px 12px !important;
+  font-size: 11px !important;
+  line-height: 1.35;
+  margin-bottom: 8px !important;
+}
+.run-status--compact .rs-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+.run-status--compact .rs-sep {
+  color: #64748b;
+  font-size: 10px;
+  user-select: none;
+}
+.run-status--compact .rs-hint {
+  color: #94a3b8;
+  font-size: 11px;
+}
+.run-status .step {
+  display: inline-block;
+  margin-right: 10px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(30, 41, 59, 0.9);
+  color: #94a3b8;
+}
+.run-status--compact .step {
+  margin-right: 0 !important;
+  padding: 2px 7px !important;
+  font-size: 10px !important;
+  border-radius: 6px !important;
+}
+.run-status .step.on {
+  color: #fef08a;
+  border: none;
+  background: rgba(120, 90, 0, 0.35);
+}
+.run-status .step.done {
+  color: #4ade80;
+  border: none;
+  background: rgba(20, 83, 45, 0.45);
+}
+.solution-pipeline {
+  max-width: 1000px;
+  margin: 0 auto 16px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: #020617;
+  border: none;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #cbd5e1;
+}
+.solution-pipeline .sp-title {
+  display: block;
+  font-weight: 700;
+  color: #e0f2fe;
+  margin-bottom: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.solution-pipeline .sp-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 4px;
+  justify-content: center;
+  text-align: center;
+}
+.solution-pipeline .sp-box {
+  background: #0f172a;
+  border: none;
+  border-radius: 10px;
+  padding: 6px 10px;
+  color: #e2e8f0;
+  font-size: 11px;
+  max-width: 140px;
+  line-height: 1.35;
+}
+.solution-pipeline .sp-box b {
+  display: block;
+  color: #67e8f9;
+  font-size: 10px;
+  font-weight: 700;
+  margin-bottom: 2px;
+  letter-spacing: 0.02em;
+}
+.solution-pipeline .sp-arrow {
+  color: #22c55e;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 0 2px;
+}
+.solution-pipeline--lower {
+  margin-top: 4px;
+  margin-bottom: 20px;
+}
+.ace-cmd-wrap {
+  max-width: 1000px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.ace-command-pro {
+  padding: 24px 26px 22px !important;
+}
+.ace-cmd-wrap {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+.ace-cmd-wrap label,
+.ace-cmd-wrap .wrap,
+.ace-cmd-wrap button,
+.ace-cmd-wrap select,
+.ace-cmd-wrap .markdown {
+  font-family: inherit;
+}
+.ace-panel-hd {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: #22c55e;
+  margin: 0 0 6px 0;
+  font-weight: 700;
+}
+.ace-panel-sub {
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: #9ca3af;
+  margin: 0 0 14px 0;
+  max-width: 64ch;
+}
+.ace-try-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: none;
+}
+.ace-event-input-wrap {
+  width: 100%;
+  margin-bottom: 2px;
+}
+.ace-event-input-wrap textarea,
+.ace-event-ta-wrap textarea,
+textarea.ace-event-ta,
+.ace-event-input-wrap .scroll-hide {
+  min-height: 7.5rem !important;
+  max-height: 20rem;
+  width: 100% !important;
+  font-size: 1.02rem !important;
+  line-height: 1.55 !important;
+  padding: 14px 16px !important;
+  border-radius: 12px !important;
+  resize: vertical !important;
+  box-sizing: border-box;
+}
+.ace-ctrls-hd {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #94a3b8;
+  margin: 20px 0 10px 0;
+  font-weight: 700;
+  padding-top: 4px;
+  border-top: none;
+}
+.ace-align-row { align-items: center !important; }
+.ace-align-row .gr-block { min-width: 0; }
+.trycol { flex: 0 0 auto; }
+.eventcol { flex: 1 1 240px; min-width: 0; }
+.trylabel-md { align-self: center !important; min-width: 5.5rem; }
+.trylabel-md p, .trylabel-md { margin: 0 !important; }
+.ace-footnote {
+  margin-top: 12px;
+  padding: 10px 0 0 0;
+  border-left: none;
+  color: #94a3b8;
+  font-size: 12.5px;
+  line-height: 1.5;
+  max-width: 100%;
+}
+.demo-quick-btn {
+  min-height: 40px;
+  min-width: 5.2rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: 10px;
+}
+.why-matters {
+  max-width: 1000px;
+  margin: 0 auto 16px;
+  padding: 14px 18px;
+  border-radius: 18px;
+  background: #020617;
+  border: none;
+  color: #e0f2fe;
+  font-size: 14px;
+  line-height: 1.55;
+}
+.round-summary {
+  max-width: 1000px;
+  margin: 0 auto 18px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: #020617;
+  border: none;
+  color: #f1f5f9;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.round-summary b {
+  color: #c4b5fd;
+  font-size: 14px;
+}
+.round-summary ul {
+  margin: 8px 0 0 18px;
+  padding: 0;
+}
+.round-summary li {
+  margin: 4px 0;
+}
+.round-summary--idle {
+  color: #94a3b8;
+}
+.round-summary--error {
+  color: #fecdd3;
+}
+.section-title {
+  max-width: 1000px;
+  margin: 0 auto 10px;
+}
+.section-title.tier-1 { font-size: 1.15rem; }
+.section-title.tier-2 { font-size: 0.95rem; opacity: 0.92; }
+.section-title.tier-3 { font-size: 0.88rem; opacity: 0.85; }
+.try-row {
+  margin-top: 8px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.agent-idle {
+  font-style: italic;
+  color: #94a3b8;
+  font-size: 0.9rem;
+}
+.metric-card .metric-delta { font-size: 1.1rem; }
+.metric-up { color: #4ade80 !important; }
+.metric-down { color: #fb7185 !important; }
+.metric-flat { color: #fde68a !important; }
+.demo-event-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+.demo-event-row .gr-block { flex: 1 1 180px; min-width: 0; }
 
 .info-dot {
   display: inline-flex;
@@ -187,11 +588,11 @@ body, .gradio-container {
   margin: 16px 0 6px;
   padding: 15px 18px;
   border-radius: 20px !important;
-  border: 1px solid rgba(34, 211, 238, 0.32);
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.18) 0%, rgba(124, 58, 237, 0.18) 100%);
+  border: none;
+  background: #020617;
   color: #e0f2fe;
   font-weight: 700;
-  box-shadow: 0 14px 35px rgba(2, 6, 23, 0.22);
+  box-shadow: none;
 }
 
 .training-proof {
@@ -204,9 +605,9 @@ body, .gradio-container {
 .metric-card {
   padding: 16px;
   border-radius: 20px;
-  background: linear-gradient(180deg, rgba(34, 211, 238, 0.16) 0%, rgba(124, 58, 237, 0.12) 100%);
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  box-shadow: 0 14px 35px rgba(2, 6, 23, 0.22);
+  background: #020617;
+  border: none;
+  box-shadow: none;
 }
 
 .metric-card b {
@@ -230,12 +631,12 @@ body, .gradio-container {
 }
 
 .flow-step {
-  background: linear-gradient(180deg, rgba(255,255,255,0.11) 0%, rgba(255,255,255,0.055) 100%);
+  background: #020617;
   border-radius: 22px;
-  border: 1px solid var(--ace-border);
+  border: none;
   padding: 16px 18px;
-  box-shadow: 0 16px 38px rgba(2, 6, 23, 0.24);
-  backdrop-filter: blur(14px);
+  box-shadow: none;
+  backdrop-filter: none;
   transition: all 0.25s ease;
 }
 
@@ -260,8 +661,8 @@ body, .gradio-container {
 .world-card {
   padding: 17px;
   border-radius: 22px;
-  background: rgba(15, 23, 42, 0.58);
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: #020617;
+  border: none;
 }
 
 .world-card b {
@@ -301,30 +702,26 @@ body, .gradio-container {
 }
 
 .flow-step:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 10px 25px rgba(0,0,0,0.25);
+  transform: translateY(-1px);
+  box-shadow: none;
 }
 
 .agent-card {
-  background: linear-gradient(180deg, rgba(255,255,255,0.15) 0%, rgba(255,255,255,0.075) 100%);
+  background: #020617;
   padding: 18px;
   border-radius: 24px;
-  border: 1px solid var(--ace-border);
+  border: none;
   margin-bottom: 14px;
-  box-shadow: 0 18px 42px rgba(2, 6, 23, 0.24);
-  backdrop-filter: blur(14px);
-  border-left: 4px solid #38bdf8;
-  transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+  box-shadow: none;
+  backdrop-filter: none;
+  border-left: none;
+  transition: transform 0.22s ease;
 }
 
 .agent-card:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 24px 70px rgba(2, 6, 23, 0.34);
+  transform: translateY(-2px);
+  box-shadow: none;
 }
-
-.agent-card.aggressive { border-left-color: #fb7185; }
-.agent-card.cooperative { border-left-color: #38bdf8; }
-.agent-card.defensive { border-left-color: #f59e0b; }
 
 .agent-grid {
   display: grid;
@@ -398,17 +795,17 @@ body, .gradio-container {
   margin: 6px 0 0;
   padding: 10px;
   border-radius: 12px;
-  background: rgba(15, 23, 42, 0.55);
+  background: #0f172a;
   color: #e0f2fe;
   white-space: pre-wrap;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: none;
 }
 
 button {
   border-radius: 16px !important;
   font-weight: 600;
   transition: all 0.2s ease;
-  box-shadow: 0 12px 28px rgba(2, 6, 23, 0.18);
+  box-shadow: none !important;
 }
 
 button:hover {
@@ -418,21 +815,21 @@ button:hover {
 textarea {
   font-family: monospace;
   font-size: 13px;
-  background: rgba(15, 23, 42, 0.72) !important;
+  background: #0f172a !important;
   color: #e5e7eb !important;
-  border: 1px solid rgba(148, 163, 184, 0.28) !important;
+  border: none !important;
 }
 
 .section-title {
   margin: 20px 0 10px;
   padding: 12px 16px;
   border-radius: 16px;
-  background: linear-gradient(135deg, rgba(34, 211, 238, 0.16) 0%, rgba(167, 139, 250, 0.16) 100%);
+  background: #020617;
   color: #f8fafc;
   font-weight: 700;
   letter-spacing: 0.3px;
-  border: 1px solid var(--ace-border);
-  box-shadow: 0 12px 28px rgba(2, 6, 23, 0.18);
+  border: none;
+  box-shadow: none;
 }
 
 @keyframes fadeInUp {
@@ -448,10 +845,10 @@ textarea {
   margin: 18px 0 8px;
   padding: 16px 18px;
   border-radius: 18px;
-  background: linear-gradient(135deg, rgba(34, 211, 238, 0.16), rgba(251, 113, 133, 0.15));
+  background: #020617;
   color: #e2e8f0;
   font-weight: 700;
-  border: 1px solid var(--ace-border);
+  border: none;
 }
 
 .small-note { color: #cbd5e1; font-size: 13px; margin: 8px 0 2px; }
@@ -462,31 +859,64 @@ label, .wrap, .prose, .markdown, .gradio-container h1, .gradio-container h2, .gr
 }
 
 input, select {
-  background: rgba(15, 23, 42, 0.72) !important;
+  background: #0f172a !important;
   color: #e5e7eb !important;
-  border-color: rgba(148, 163, 184, 0.28) !important;
+  border: none !important;
 }
 
-/* Terminal-grade visual reset: black canvas, crisp borders, no glossy gradients. */
+/* Terminal-grade visual reset: black canvas, minimal chrome. */
 body, .gradio-container {
-  background: #000 !important;
+  background: #020617 !important;
   color: #d1fae5 !important;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace !important;
 }
-
-.gradio-container {
-  max-width: 1560px !important;
+.ace-cmd-wrap,
+.ace-cmd-wrap * {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif !important;
+}
+.ace-cmd-wrap textarea.ace-event-ta,
+.ace-cmd-wrap .ace-event-input-wrap textarea {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
 }
 
-.hero, .command-shell, .story-stage, .flow-step, .world-card, .agent-card, .metric-card, .section-title, .why-matters {
-  background: #050505 !important;
-  border: 1px solid #1f2937 !important;
+.gradio-container {
+  max-width: 100vw !important;
+  width: 100vw !important;
+  margin: 0 !important;
+  padding: 0 24px !important;
+}
+
+.hero, .command-shell, .story-stage, .story-stage.story-hero, .flow-step, .world-card, .agent-card, .metric-card, .section-title, .why-matters, .solution-pipeline, .run-status, .round-summary {
+  background: #020617 !important;
+  border: none !important;
   box-shadow: none !important;
   backdrop-filter: none !important;
 }
+.solution-pipeline .sp-box {
+  background: #0f172a !important;
+  border: none !important;
+}
+.solution-pipeline .sp-arrow { color: #22c55e !important; }
+.solution-pipeline .sp-box b { color: #4ade80 !important; }
+.story-stage.story-hero {
+  border: none !important;
+}
+.run-status .step.on {
+  color: #facc15 !important;
+  border: none !important;
+  background: rgba(120, 90, 0, 0.35) !important;
+}
+.run-status .step.done {
+  color: #4ade80 !important;
+  border: none !important;
+  background: rgba(20, 83, 45, 0.45) !important;
+}
+.round-summary b {
+  color: #86efac !important;
+}
 
 .hero {
-  border-color: #22c55e !important;
+  border: none !important;
 }
 
 .hero h1, .section-title {
@@ -494,25 +924,47 @@ body, .gradio-container {
   text-shadow: 0 0 14px rgba(34, 197, 94, 0.24);
 }
 
-.hero p, .small-note, .agent-muted, .flow-step span, label {
+.hero p, .hero .hero-line2, .small-note, .agent-muted, .flow-step span, label {
   color: #94a3b8 !important;
+}
+.hero .hero-eie-title {
+  color: #86efac !important;
+  font-size: clamp(1.2rem, 2.2vw, 1.65rem) !important;
+}
+.hero .hero-line2 {
+  opacity: 0.95;
 }
 
 .mode-pill, .agent-pill {
-  background: #020617 !important;
-  border: 1px solid #334155 !important;
+  background: #0f172a !important;
+  border: none !important;
   color: #67e8f9 !important;
 }
 
+.ace-panel-hd { color: #22c55e !important; letter-spacing: 0.14em !important; }
+.ace-panel-sub { color: #94a3b8 !important; }
+.ace-try-chips { border-bottom: none !important; }
+.ace-ctrls-hd { color: #86efac !important; border-top: none !important; }
+.ace-footnote { border: none !important; color: #9ca3af !important; }
+.ace-event-input-wrap textarea,
+.ace-event-ta-wrap textarea,
+textarea.ace-event-ta {
+  min-height: 8.5rem !important;
+  font-size: 0.95rem !important;
+  line-height: 1.5 !important;
+  padding: 16px 18px !important;
+  border-radius: 10px !important;
+}
+
 textarea, input, select, .wrap, .block, .form {
-  background: #020617 !important;
+  background: #0f172a !important;
   color: #d1fae5 !important;
-  border-color: #334155 !important;
+  border: none !important;
 }
 
 input[type="checkbox"], input[type="radio"] {
   accent-color: #22c55e !important;
-  outline: 1px solid #64748b !important;
+  outline: none !important;
 }
 
 label:has(input[type="radio"]:checked),
@@ -524,14 +976,14 @@ label:has(input[type="checkbox"]:checked) {
 
 label:has(input[type="radio"]) {
   padding: 8px 10px !important;
-  border: 1px solid #334155 !important;
+  border: none !important;
   border-radius: 10px !important;
 }
 
 button {
-  background: #020617 !important;
+  background: #0f172a !important;
   color: #d1fae5 !important;
-  border: 1px solid #22c55e !important;
+  border: none !important;
   box-shadow: none !important;
 }
 
@@ -556,21 +1008,17 @@ button:hover {
   width: 220px;
   padding: 9px 10px;
   border-radius: 8px;
-  background: #020617;
+  background: #0f172a;
   color: #d1fae5;
-  border: 1px solid #22c55e;
+  border: none;
   font-size: 11px;
   line-height: 1.35;
-  box-shadow: 0 0 20px rgba(34, 197, 94, 0.18);
+  box-shadow: none;
 }
 
 .mini-fill {
   background: #22c55e !important;
 }
-
-.agent-card.aggressive { border-left-color: #ef4444 !important; }
-.agent-card.cooperative { border-left-color: #38bdf8 !important; }
-.agent-card.defensive { border-left-color: #f59e0b !important; }
 
 .agent-bars {
   display: grid;
@@ -592,7 +1040,7 @@ button:hover {
   border-radius: 999px;
   background: #111827;
   overflow: hidden;
-  border: 1px solid #1f2937;
+  border: none;
 }
 
 .agent-bar-fill {
@@ -601,7 +1049,7 @@ button:hover {
 }
 
 .terminal-panel {
-  border: 1px solid #1f2937;
+  border: none;
   background: #020617;
   padding: 16px;
   border-radius: 14px;
@@ -617,6 +1065,24 @@ def make_fresh_env() -> ACEWorldEnv:
     return ACEWorldEnv()
 
 
+def default_ui_provider() -> str:
+    """Prefer explicit LLM_PROVIDER; else Groq key; else HF token (typical on Hugging Face Spaces)."""
+    env_p = (os.getenv("LLM_PROVIDER") or "").lower().strip()
+    if env_p in PROVIDERS and env_p != "fallback":
+        return env_p
+    if get_groq_api_key():
+        return "groq"
+    if get_hf_user_token():
+        return "huggingface"
+    return "fallback"
+
+
+def default_model_textbox() -> str:
+    if default_ui_provider() == "huggingface":
+        return os.getenv("HF_INFERENCE_MODEL", DEFAULT_HF_INFERENCE_MODEL)
+    return os.getenv("GROQ_MODEL", GROQ_MODEL)
+
+
 def normalize_provider(provider: str | None) -> str:
     value = (provider or os.getenv("LLM_PROVIDER", "fallback")).lower().strip()
     return value if value in PROVIDERS else "fallback"
@@ -629,7 +1095,9 @@ def resolve_model(provider: str | None, model_choice: str | None = None) -> str:
         return choice
     if provider == "anthropic":
         return ANTHROPIC_MODEL
-    return GROQ_MODEL
+    if provider == "huggingface":
+        return os.getenv("HF_INFERENCE_MODEL", DEFAULT_HF_INFERENCE_MODEL)
+    return os.getenv("GROQ_MODEL", GROQ_MODEL)
 
 
 def apply_model_choice(provider: str | None, model_choice: str | None = None) -> None:
@@ -639,6 +1107,8 @@ def apply_model_choice(provider: str | None, model_choice: str | None = None) ->
         os.environ["ANTHROPIC_MODEL"] = model
     elif provider == "groq":
         os.environ["GROQ_MODEL"] = model
+    elif provider == "huggingface":
+        os.environ["HF_INFERENCE_MODEL"] = model
 
 
 def apply_llm_runtime_config(provider: str | None, model_choice: str | None = None) -> tuple[bool, str]:
@@ -646,10 +1116,33 @@ def apply_llm_runtime_config(provider: str | None, model_choice: str | None = No
     provider = normalize_provider(provider)
     apply_model_choice(provider, model_choice)
 
-    key_env = PROVIDER_KEY_ENV.get(provider)
-
     if provider == "fallback":
-        return False, "Choose Groq or Anthropic for LLM-Based RL. API keys should be set as environment variables or Hugging Face Space secrets."
+        return (
+            False,
+            "For LLM-Based RL, pick Groq, Hugging Face, or Anthropic in “Provider”, then set the matching secret "
+            "(GROQ_API_KEY, HF_TOKEN, or ANTHROPIC_API_KEY) in your environment or Space settings.",
+        )
+
+    if provider == "huggingface":
+        if get_hf_user_token():
+            return True, f"LLM ready: huggingface / {resolve_model(provider, model_choice)}"
+        return (
+            False,
+            "Missing Hugging Face token. In Space Settings → Secrets, add HF_TOKEN (read). "
+            "Optional: set variable HF_INFERENCE_MODEL to a chat model id on the Hub.",
+        )
+
+    if provider == "groq":
+        ensure_groq_key_in_environ()
+        if get_groq_api_key():
+            return True, f"LLM ready: groq / {resolve_model(provider, model_choice)}"
+        return (
+            False,
+            "Missing Groq API key. In Space Settings → Repository secrets, add a secret named exactly "
+            "**GROQ_API_KEY** (or GROQ / GROQ_KEY), paste your `gsk_...` key, save, then **Factory reboot** the Space.",
+        )
+
+    key_env = PROVIDER_KEY_ENV.get(provider)
     if key_env and os.getenv(key_env):
         return True, f"LLM ready: {provider} / {resolve_model(provider, model_choice)}"
     if key_env:
@@ -699,12 +1192,12 @@ def llm_or_fallback_decision(
         except Exception:
             return fallback
 
-    if provider == "groq" and os.getenv("GROQ_API_KEY"):
+    if provider == "groq" and get_groq_api_key():
         try:
             def groq_generator(prompt: str) -> str:
                 return call_groq_chat_completion(
                     messages=[{"role": "user", "content": prompt}],
-                    model=GROQ_MODEL,
+                    model=os.getenv("GROQ_MODEL", GROQ_MODEL),
                     temperature=0.2,
                     max_tokens=160,
                 )
@@ -717,6 +1210,27 @@ def llm_or_fallback_decision(
                 debug=debug,
             )
 
+        except Exception:
+            return fallback
+
+    if provider == "huggingface" and get_hf_user_token():
+        try:
+            def hf_generator(prompt: str) -> str:
+                mdl = os.getenv("HF_INFERENCE_MODEL", DEFAULT_HF_INFERENCE_MODEL)
+                return call_huggingface_chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=mdl,
+                    temperature=0.2,
+                    max_tokens=160,
+                )
+
+            return llm_policy(
+                env,
+                agent,
+                fallback_fn=lambda: fallback,
+                generator=hf_generator,
+                debug=debug,
+            )
         except Exception:
             return fallback
 
@@ -735,7 +1249,7 @@ def repair_json_candidate(raw: str) -> str:
 def training_mode_generator(provider: str, model_choice: str | None = None, debug: bool = False):
     provider = normalize_provider(provider)
     model_name = resolve_model(provider, model_choice)
-    if provider == "groq" and os.getenv("GROQ_API_KEY"):
+    if provider == "groq" and get_groq_api_key():
         def groq_generator(prompt: str) -> str:
             return call_groq_chat_completion(
                 messages=[{"role": "user", "content": prompt}],
@@ -745,6 +1259,17 @@ def training_mode_generator(provider: str, model_choice: str | None = None, debu
             )
 
         return groq_generator
+
+    if provider == "huggingface" and get_hf_user_token():
+        def hf_generator(prompt: str) -> str:
+            return call_huggingface_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=model_name,
+                temperature=0.7,
+                max_tokens=220,
+            )
+
+        return hf_generator
 
     if provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
         try:
@@ -769,27 +1294,31 @@ def training_mode_generator(provider: str, model_choice: str | None = None, debu
 
 
 def evaluate_candidate_action(env: ACEWorldEnv, agent: AgentProfile, action: dict[str, Any], valid_json: bool) -> float:
-    env_copy = copy.deepcopy(env)
-    available = [item.agent_id for item in env_copy.agents]
-    actions = []
-    for item in env_copy.agents:
-        if item.agent_id == agent.agent_id:
-            actions.append(action)
-        else:
-            actions.append(
-                item.choose_fallback_action(
-                    env_copy.world.derive_round_probabilities(),
-                    env_copy.round_number + 1,
-                    available,
+    """Score one candidate on a copied env; never raises (bad rollouts get a large penalty)."""
+    try:
+        env_copy = copy.deepcopy(env)
+        available = [item.agent_id for item in env_copy.agents]
+        actions = []
+        for item in env_copy.agents:
+            if item.agent_id == agent.agent_id:
+                actions.append(action)
+            else:
+                actions.append(
+                    item.choose_fallback_action(
+                        env_copy.world.derive_round_probabilities(),
+                        env_copy.round_number + 1,
+                        available,
+                    )
                 )
-            )
-    result = env_copy.step(actions)
-    reward = next(
-        float(item["reward"]["total"])
-        for item in result["results"]
-        if item["agent"].agent_id == agent.agent_id
-    )
-    return reward if valid_json else reward - 1.0
+        result = env_copy.step(actions)
+        reward = next(
+            float(item["reward"]["total"])
+            for item in result["results"]
+            if item["agent"].agent_id == agent.agent_id
+        )
+        return reward if valid_json else reward - 1.0
+    except Exception:
+        return -50.0 if valid_json else -51.0
 
 
 def sample_training_action(
@@ -817,7 +1346,12 @@ def sample_training_action(
             candidate = random_training_action(agent, env, rng)
             raw = json.dumps(candidate)
         else:
-            raw = generator(prompt)
+            try:
+                raw = generator(prompt) or ""
+            except Exception as exc:
+                if debug:
+                    print(f"[sample_training_action] {agent.name} sample {sample_idx + 1}: {exc}")
+                raw = ""
 
         repaired = repair_json_candidate(raw)
         parsed = extract_first_valid_json(repaired)
@@ -848,10 +1382,19 @@ def sample_training_action(
 
 
 def training_mode_decisions(env: ACEWorldEnv, provider: str, model_choice: str | None = None, debug: bool = False) -> tuple[list[dict[str, Any]], str]:
-    actions = []
-    reports = []
+    actions: list[dict[str, Any]] = []
+    reports: list[str] = []
+    available = [item.agent_id for item in env.agents]
+    probs = env.world.derive_round_probabilities()
+    rnd = env.round_number + 1
     for agent in env.agents:
-        action, report = sample_training_action(env, agent, provider, model_choice=model_choice, debug=debug, k=3)
+        try:
+            action, report = sample_training_action(env, agent, provider, model_choice=model_choice, debug=debug, k=3)
+        except Exception as exc:
+            if debug:
+                print(f"[training_mode_decisions] {agent.name}: {exc}")
+            action = agent.choose_fallback_action(probs, rnd, available)
+            report = f"{agent.name}: used internal fallback after LLM path error ({exc})."
         actions.append(action)
         reports.append(report)
     return actions, "\n\n".join(reports)
@@ -956,7 +1499,7 @@ def render_flow_strip(env: ACEWorldEnv) -> str:
     rounds = env.round_number
     agent_state = "Agents ready" if rounds == 0 else f"Round {rounds} complete"
     return f"""
-<div class="story-stage">
+<div class="story-stage story-hero">
 <div class="flow-strip">
   <div class="flow-step">
     <b>🌍 Event <span class="info-dot" data-tip="User-provided real-world scenario">i</span></b>
@@ -977,6 +1520,149 @@ def render_flow_strip(env: ACEWorldEnv) -> str:
 </div>
 </div>
 """
+
+
+def render_run_status_html(phase: int, detail: str = "") -> str:
+    """phase: -1 idle, 0–2 working, 3 done, 4+ error (compact one-line style)."""
+    if phase < 0:
+        return (
+            "<div class='run-status run-status--compact'>"
+            "<span class='rs-hint'>Press <b>Run →</b> to run: inject event → world update → agent policy → result.</span>"
+            "</div>"
+        )
+    if phase >= 4:
+        msg = detail or "Run blocked"
+        return (
+            f"<div class='run-status run-status--compact'>"
+            f"<span class='step on' style='color:#fb7185'>{escape(msg)}</span></div>"
+        )
+    step_labels = ["Inject", "World", "Agents", "Complete"]
+    tips = [
+        "Injecting event",
+        "Updating world",
+        "Agent policy & actions",
+        "Round complete",
+    ]
+    parts: list[str] = [
+        "<div class='run-status run-status--compact'><div class='rs-steps' title='Run pipeline' aria-live='polite'>",
+    ]
+    for i in range(3):
+        short, title = step_labels[i], tips[i]
+        cls = "step"
+        if phase > i:
+            cls += " done"
+        elif phase == i:
+            cls += " on"
+        parts.append(f'<span class="{cls}" title="{escape(title)}">{i + 1}·{short}</span>')
+        if i < 2:
+            parts.append("<span class='rs-sep'>›</span>")
+
+    if phase >= 3:
+        last = (detail or "Done").strip()
+    else:
+        last = (detail or "…").strip()
+    if len(last) > 32:
+        last = last[:29] + "…"
+    dcls = "step done" if phase >= 3 else "step"
+    parts.append("<span class='rs-sep'>›</span>")
+    parts.append(f'<span class="{dcls}" title="{escape(tips[3])}">4·{escape(last)}</span>')
+    parts.append("</div></div>")
+    return "".join(parts)
+
+
+def _fmt_delta(prev: float | None, cur: float, invert_good: bool = False) -> str:
+    if prev is None:
+        return ""
+    d = cur - prev
+    if abs(d) < 1e-6:
+        return " (flat)"
+    up = d > 0
+    if invert_good:
+        up = not up
+    return f" ({'up' if d > 0 else 'down'} {abs(d):.2f})"
+
+
+def build_round_summary(
+    env: ACEWorldEnv,
+    result: dict[str, Any] | None,
+    policy_mode: str,
+    pre_vol: float | None = None,
+    pre_coop: float | None = None,
+) -> str:
+    if not result:
+        return (
+            "<div class='round-summary round-summary--idle'>"
+            "<b>What just happened?</b> Run a round to get a one-glance summary here."
+            "</div>"
+        )
+    event = escape(env.world.event_log[-1] if env.world.event_log else "—")
+    gt = result["ground_truth"]
+    correct = [item["agent"].name for item in result["results"] if item["correct"]]
+    optimal = {
+        "competitive": {"challenge", "betray", "submit_bid"},
+        "cooperative": {"propose_alliance", "accept_alliance", "execute_contract", "submit_bid"},
+        "resource": {"allocate_resources", "execute_contract"},
+    }[gt]
+    ok_names = [item["agent"].name for item in result["results"] if item["action"]["action"] in optimal]
+    w = env.world
+    vol_note = f"Volatility {w.market_volatility:.2f}"
+    if pre_vol is not None:
+        vol_note += _fmt_delta(pre_vol, w.market_volatility)
+    coop_note = f"Cooperation {w.cooperation_index:.2f}"
+    if pre_coop is not None:
+        coop_note += _fmt_delta(pre_coop, w.cooperation_index, invert_good=True)
+    wrong_pred = [
+        item
+        for item in result["results"]
+        if str(item["action"].get("predicted_round", "")).lower() != str(gt).lower()
+    ]
+    misp_text = (
+        f"{len(wrong_pred)}/{len(result['results'])} agents’ explicit round-guesses did not match the hidden draw <b>{gt.upper()}</b>."
+        if wrong_pred
+        else f"Hidden round is <b>{gt.upper()}</b>; several agents still earned reward from market and social effects."
+    )
+    mode_label = "LLM-Based RL" if policy_mode == "LLM-Based RL" else "Agent-Based RL (Q-learning / trust, no live LLM)"
+    who_opt = ", ".join(ok_names) if ok_names else "none"
+    if len(ok_names) == 1:
+        who_opt = f"Only <b>{ok_names[0]}</b> picked a round-optimal action class."
+    elif len(ok_names) > 1:
+        who_opt = f"Round-optimal moves: {', '.join(ok_names)}."
+    else:
+        who_opt = "No agent landed a round-optimal action class; rewards still move from markets and social effects."
+
+    return f"""
+<div class="round-summary">
+  <b>What just happened?</b> — {mode_label}
+  <ul>
+    <li>Event: {event} → regime <b>{escape(w.economic_regime())}</b> · {vol_note} · {coop_note}</li>
+    <li>Hidden round (ground truth): <b>{gt.upper()}</b> — correct predictors: {", ".join(correct) or "none"}</li>
+    <li>{misp_text}</li>
+    <li>{who_opt}</li>
+  </ul>
+</div>
+""".strip()
+
+
+def agent_idle_mood(agent: AgentProfile, env: ACEWorldEnv) -> str:
+    w = env.world
+    v = w.market_volatility
+    if agent.company_type and "Hedge" in agent.company_type:
+        return "Scanning for mispriced risk and an opening bid…"
+    if "Central" in agent.name or "Bank" in agent.name:
+        return "Weighing stability vs. contagion before the next move…"
+    if "Petro" in agent.name or "Energy" in agent.company_type:
+        return f"Watching oil and energy at {w.oil_price:.2f}× and {w.energy_cost:.2f}×…"
+    if "Food" in agent.company_type or "GlobalFoods" in agent.name:
+        return "Tracking food and supply-chain slack before committing…"
+    if "Logi" in agent.name or "Logistics" in agent.company_type:
+        return f"Mapping route risk while volatility is {v:.2f}…"
+    if "Insur" in agent.company_type or "Shield" in agent.name:
+        return "Estimating loss tails and who might default next…"
+    if "Tech" in agent.company_type or "Nova" in agent.name:
+        return "Calibrating capex and partner risk under stress…"
+    if v > 0.45:
+        return "Waiting for a cleaner market signal in heavy volatility…"
+    return "Idle posture: reading peers and the board before acting…"
 
 
 def render_economic_flow(env: ACEWorldEnv) -> str:
@@ -1089,8 +1775,8 @@ def render_agent_cards(env: ACEWorldEnv, round_result: dict[str, Any] | None = N
             reasoning = action.get("reasoning", "")
             reward_line = f"{reward['total']:+.2f}"
         else:
-            action_name = "waiting"
-            reasoning = agent.primary_objective
+            action_name = "standing by"
+            reasoning = agent_idle_mood(agent, env)
             reward_line = "+0.00"
         stance = _behavior_label(action_name).lower()
         avg_trust = statistics.mean(agent.trust_scores.values()) if agent.trust_scores else 0.5
@@ -1108,6 +1794,7 @@ def render_agent_cards(env: ACEWorldEnv, round_result: dict[str, Any] | None = N
     <span class="agent-pill">{escape(stance.title())}</span>
   </div>
   <div class="agent-action">{escape(action_name.replace("_", " "))}</div>
+  <div class="agent-idle">{escape(reasoning) if not item else ""}</div>
   <div class="agent-meta">
     <span>Reward <b style="color:{reward_class};">{escape(reward_line)}</b></span>
     <span>Trust {avg_trust:.2f} <span class="info-dot" data-tip="Mean trust toward other agents">i</span></span>
@@ -1122,7 +1809,7 @@ def render_agent_cards(env: ACEWorldEnv, round_result: dict[str, Any] | None = N
     <div class="agent-bar-row"><span>belief</span><div class="agent-bar-track"><div class="agent-bar-fill" style="width:{belief_value * 100:.0f}%"></div></div><span>{belief_value:.0%}</span></div>
     <div class="agent-bar-row"><span>capital</span><div class="agent-bar-track"><div class="agent-bar-fill" style="width:{resource_value * 100:.0f}%"></div></div><span>{resources:.0f}</span></div>
   </div>
-  <div class="agent-why">Why: {escape(reasoning[:150] or agent.memory_summary()[:150])}</div>
+  <div class="agent-why">Why: {escape((reasoning if item else agent.memory_summary())[:180])}</div>
 </div>
 """)
     return "<div class='agent-grid'>" + "\n".join(cards) + "</div>"
@@ -1331,17 +2018,32 @@ def evaluate_training_policy(
     return rows
 
 
+def _fmt_training_delta(val: float, *, as_percent: bool = False) -> str:
+    if as_percent:
+        pct = 100.0 * val
+        cls = "metric-up" if pct >= 0 else "metric-down"
+        arr = "↑" if pct >= 0 else "↓"
+        return f'<span class="{cls}">{pct:+.1f}% {arr}</span>'
+    cls = "metric-up" if val >= 0 else "metric-down"
+    arr = "↑" if val >= 0 else "↓"
+    return f'<span class="{cls}">{val:+.2f} {arr}</span>'
+
+
 def render_training_metric_cards(lifts: list[dict[str, Any]]) -> str:
     oil = next((item for item in lifts if item["scenario"] == "oil_crisis"), {})
     peace = next((item for item in lifts if item["scenario"] == "peace_scenario"), {})
-    cards = [
-        ("Oil Reward Lift", f"{oil.get('reward_lift_vs_random', 0.0):+.2f}"),
-        ("Peace Reward Lift", f"{peace.get('reward_lift_vs_random', 0.0):+.2f}"),
-        ("Peace Accuracy Lift", f"{peace.get('accuracy_lift_vs_random', 0.0):+.0%}"),
-        ("Trust Delta", f"{peace.get('trust_delta_vs_untrained', 0.0):+.2f}"),
+    o_lift = float(oil.get("reward_lift_vs_random", 0.0))
+    p_lift = float(peace.get("reward_lift_vs_random", 0.0))
+    acc = float(peace.get("accuracy_lift_vs_random", 0.0))
+    trust_d = float(peace.get("trust_delta_vs_untrained", 0.0))
+    cards: list[tuple[str, str]] = [
+        ("Reward lift (oil vs random)", _fmt_training_delta(o_lift)),
+        ("Reward lift (peace vs random)", _fmt_training_delta(p_lift)),
+        ("Accuracy lift (peace vs random)", _fmt_training_delta(acc, as_percent=True)),
+        ("Trust Δ (peace, trained vs untrained)", _fmt_training_delta(trust_d)),
     ]
-    return "<div class='training-proof'>" + "".join(
-        f"<div class='metric-card'><b>{escape(label)}</b><span>{escape(value)}</span></div>"
+    return "<div class='training-proof training-proof--hero'>" + "".join(
+        f"<div class='metric-card'><b>{escape(label)}</b>{value}</div>"
         for label, value in cards
     ) + "</div>"
 
@@ -1361,8 +2063,8 @@ def training_comparison_plot(summary: list[dict[str, Any]]):
         title="Phase 1 Training Proof: Reward by Policy",
         barmode="group",
         template="plotly_dark",
-        paper_bgcolor="#0f172a",
-        plot_bgcolor="#0f172a",
+        paper_bgcolor="#020617",
+        plot_bgcolor="#020617",
         font=dict(color="#e2e8f0"),
         height=330,
         margin=dict(l=20, r=20, t=45, b=30),
@@ -1495,8 +2197,8 @@ def resource_plot(env: ACEWorldEnv):
         fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines+markers", name=agent.name))
     fig.update_layout(
     template="plotly_dark",
-    paper_bgcolor="#0f172a",
-    plot_bgcolor="#0f172a",
+    paper_bgcolor="#020617",
+    plot_bgcolor="#020617",
     font=dict(color="#e2e8f0"),
     height=300,
     margin=dict(l=20, r=20, t=30, b=20),
@@ -1545,6 +2247,8 @@ def inject_event(event_text: str, provider: str, debug_llm: bool, env: ACEWorldE
         env,
         impact,
         *render_world(env),
+        render_run_status_html(3, "Event applied"),
+        build_round_summary(env, None, "Agent-Based RL"),
         render_flow_strip(env),
         render_world_gauges(env),
         render_economic_flow(env),
@@ -1555,61 +2259,144 @@ def inject_event(event_text: str, provider: str, debug_llm: bool, env: ACEWorldE
         render_interactions(env),
         render_behavior_evolution(env),
         render_optimal_comparison(None),
-        "Switch to LLM-Based RL and run a round to see sampled actions, rewards, advantages, and selected strategy.",
+        "Open the LLM-Based RL traces accordion after a run in that mode to see multi-sample selection.",
         resource_plot(env),
         world_plot(env),
         render_history(env),
-        "Inject an event, then run a round.",
+        "Inject an event, then run a full round to watch agents act.",
     )
-
-
-def select_preset_event(preset_event: str) -> str:
-    return preset_event or PERFECT_DEMO_EVENT
 
 
 def select_provider_model(provider: str) -> str:
     return resolve_model(provider)
 
 
-def run_simulation(event_text: str, provider: str, model_choice: str, debug_llm: bool, env: ACEWorldEnv | None, policy_mode: str):
-    env = env or make_fresh_env()
-    provider = normalize_provider(provider)
-    llm_ready, llm_status = apply_llm_runtime_config(provider, model_choice)
-    if policy_mode == "LLM-Based RL" and not llm_ready:
-        return (
-            env,
-            llm_status,
-            *render_world(env),
-            render_flow_strip(env),
-            render_world_gauges(env),
-            render_economic_flow(env),
-            render_probability_bars(env),
-            render_agent_rows(env),
-            render_agent_cards(env),
-            render_trust(env),
-            render_interactions(env),
-            render_behavior_evolution(env),
-            render_optimal_comparison(None),
-            f"{llm_status}\n\nLLM-Based RL needs a live provider secret because it samples model-generated strategies before selecting the best action.",
-            resource_plot(env),
-            world_plot(env),
-            render_history(env),
-            "Waiting for LLM credentials.",
-        )
-    text = event_text.strip() or PERFECT_DEMO_EVENT
-    latest_event = env.world.event_log[-1] if env.world.event_log else None
-    if latest_event != text:
-        trace = env.apply_event(text, provider=provider, debug=bool(debug_llm))
-        impact = describe_impact(trace["deltas"], text, trace["reasoning"])
-    else:
-        impact = f"Continuing scenario: {text}"
-
-    round_result = run_round(env, provider, debug_llm, policy_mode, model_choice)
-    env = round_result[0]
+def _pack_run_outputs(
+    env: ACEWorldEnv,
+    impact: str,
+    status_phase: int,
+    status_detail: str,
+    round_summary_html: str,
+    training_str: str,
+    result: dict[str, Any] | None,
+    god_str: str,
+) -> tuple[Any, ...]:
+    """Assemble a single line of Gradio outputs (env + 37 trailing components)."""
     return (
         env,
         impact,
-        *round_result[1:],
+        *render_world(env),
+        render_run_status_html(status_phase, status_detail),
+        round_summary_html,
+        render_flow_strip(env),
+        render_world_gauges(env),
+        render_economic_flow(env),
+        render_probability_bars(env),
+        render_agent_rows(env, result),
+        render_agent_cards(env, result),
+        render_trust(env),
+        render_interactions(env),
+        render_behavior_evolution(env),
+        render_optimal_comparison(result),
+        training_str,
+        resource_plot(env),
+        world_plot(env),
+        render_history(env),
+        god_str,
+    )
+
+
+def llm_setup_error_html(llm_status: str) -> str:
+    text = (llm_status or "LLM provider is not configured.").strip()
+    return f"<div class='round-summary round-summary--error'>{escape(text)}</div>"
+
+
+def run_simulation(
+    event_text: str, provider: str, model_choice: str, debug_llm: bool, env: ACEWorldEnv | None, policy_mode: str
+):
+    """Generator: cinematic status + final full state. Yields 38 values (env + 37) each time."""
+    env = env or make_fresh_env()
+    provider = normalize_provider(provider)
+    llm_ready, llm_status = apply_llm_runtime_config(provider, model_choice)
+    work = (event_text or "").strip() or PERFECT_DEMO_EVENT
+    t_idle = "Agent-Based RL" if policy_mode == "Agent-Based RL" else "LLM-Based RL"
+    t_wait = f"{t_idle}. Queued: {work[:100]}"
+
+    if policy_mode == "LLM-Based RL" and not llm_ready:
+        err_html = llm_setup_error_html(llm_status)
+        tr = llm_status
+        yield _pack_run_outputs(
+            env,
+            tr,
+            4,
+            llm_status,
+            err_html,
+            tr,
+            None,
+            "Waiting for credentials.",
+        )
+        return
+
+    work_rs = (
+        "<div class='round-summary round-summary--idle'><b>What just happened?</b> Working through the pipeline…</div>"
+    )
+    yield _pack_run_outputs(
+        env,
+        f"⏳ {t_wait}",
+        0,
+        "",
+        work_rs,
+        "Pipeline starting…",
+        None,
+        "Staged: injecting event (animation).",
+    )
+    time.sleep(0.45)
+    latest_event = env.world.event_log[-1] if env.world.event_log else None
+    if latest_event != work:
+        trace = env.apply_event(work, provider=provider, debug=bool(debug_llm))
+        impact = describe_impact(trace["deltas"], work, trace["reasoning"])
+    else:
+        impact = f"Continuing scenario: {work}"
+
+    yield _pack_run_outputs(
+        env,
+        impact,
+        1,
+        "",
+        work_rs,
+        "World state updating…",
+        None,
+        "Staged: world + incentives refresh.",
+    )
+    time.sleep(0.45)
+    yield _pack_run_outputs(
+        env,
+        impact,
+        2,
+        "",
+        work_rs,
+        "Agents planning actions…",
+        None,
+        "Staged: agent policy / LLM search.",
+    )
+    time.sleep(0.45)
+
+    out = run_round(env, provider, debug_llm, policy_mode, model_choice)
+    env2 = out[0]
+    result = out[-1]
+    flat = out[1:-1]
+    rsum = flat[-1]
+    tr = flat[29]
+    god = flat[33]
+    yield _pack_run_outputs(
+        env2,
+        impact,
+        3,
+        "Done",
+        rsum,
+        tr,
+        result,
+        god,
     )
 
 
@@ -1617,10 +2404,11 @@ def run_round(env: ACEWorldEnv | None, provider: str, debug_llm: bool, policy_mo
     env = env or make_fresh_env()
     provider = normalize_provider(provider)
     llm_ready, llm_status = apply_llm_runtime_config(provider, model_choice)
-    training_report = "Agent-Based RL used: agents acted through learned fallback policy, Q-values, trust, memory, and opponent models."
+    training_report = "Agent-Based RL: internal policy with Q-values, trust, memory, and opponent models."
 
     if policy_mode == "LLM-Based RL":
         if not llm_ready:
+            rs = llm_setup_error_html(llm_status)
             return (
                 env,
                 *render_world(env),
@@ -1634,15 +2422,21 @@ def run_round(env: ACEWorldEnv | None, provider: str, debug_llm: bool, policy_mo
                 render_interactions(env),
                 render_behavior_evolution(env),
                 render_optimal_comparison(None),
-                f"{llm_status}\n\nSet the provider key in .env or Hugging Face Space secrets, confirm provider/model, then run again.",
+                llm_status,
                 resource_plot(env),
                 world_plot(env),
                 render_history(env),
                 "Waiting for LLM credentials.",
+                rs,
+                None,
             )
         actions, training_report = training_mode_decisions(env, provider, model_choice=model_choice, debug=bool(debug_llm))
+        pre_vol = env.world.market_volatility
+        pre_coop = env.world.cooperation_index
         result = env.step(actions)
     else:
+        pre_vol = env.world.market_volatility
+        pre_coop = env.world.cooperation_index
         result = env.step()
 
     ground_truth = result["ground_truth"]
@@ -1653,6 +2447,7 @@ def run_round(env: ACEWorldEnv | None, provider: str, debug_llm: bool, policy_mo
         f"Alliances: {sorted([list(pair) for pair in env.alliances])}\n"
         f"Regime: {env.world.economic_regime()}"
     )
+    round_summary = build_round_summary(env, result, policy_mode, pre_vol, pre_coop)
     return (
         env,
         *render_world(env),
@@ -1671,6 +2466,8 @@ def run_round(env: ACEWorldEnv | None, provider: str, debug_llm: bool, policy_mo
         world_plot(env),
         render_history(env),
         god_mode,
+        round_summary,
+        result,
     )
 
 
@@ -1691,13 +2488,17 @@ def run_five_rounds(env: ACEWorldEnv | None, provider: str, debug_llm: bool, pol
             last = env.step()
     ground_truth = last["ground_truth"] if last else "none"
     god_mode = f"Ran 5 rounds. Last hidden round: {ground_truth.upper()}."
-    training_report = "\n\n--- ROUND SAMPLE TRACE ---\n\n".join(reports[-2:]) if reports else "Agent-Based RL used: repeated rounds updated agent memory, trust, opponent models, and Q-values."
+    training_report = "\n\n--- ROUND SAMPLE TRACE ---\n\n".join(reports[-2:]) if reports else "Agent-Based RL: 5 repeated rounds — memory, trust, and Q-table updates per agent."
     if policy_mode == "LLM-Based RL" and not llm_ready:
         training_report = f"{llm_status}\n\nSet the provider key in .env or Hugging Face Space secrets, confirm provider/model, then run again."
         god_mode = "Waiting for LLM credentials."
+    rsum = build_round_summary(env, last, policy_mode) if last else build_round_summary(env, None, policy_mode)
+    run_st = render_run_status_html(3, f"5 rounds | last draw: {ground_truth.upper()}")
     return (
         env,
         *render_world(env),
+        run_st,
+        rsum,
         render_flow_strip(env),
         render_world_gauges(env),
         render_economic_flow(env),
@@ -1737,6 +2538,8 @@ def reset_demo():
         env,
         "World reset.",
         *render_world(env),
+        render_run_status_html(-1),
+        build_round_summary(env, None, "Agent-Based RL"),
         render_flow_strip(env),
         render_world_gauges(env),
         render_economic_flow(env),
@@ -1747,7 +2550,7 @@ def reset_demo():
         render_interactions(env),
         render_behavior_evolution(env),
         render_optimal_comparison(None),
-        "Switch to LLM-Based RL and run a round to see sampled actions, rewards, advantages, and selected strategy.",
+        "Use LLM-Based RL to see multi-sample actions and the best pick; Agent-Based RL runs with no model API calls.",
         resource_plot(env),
         world_plot(env),
         render_history(env),
@@ -1767,68 +2570,105 @@ def build_ui():
             """
 <div class="hero">
   <h1>EIE</h1>
-  <p>Economic Intelligence Engine: Learning Decisions in Dynamic Economic and Geopolitical Systems</p>
-  <div class="mode-pill">Event Reported → LLM Interprets → World Change → Agents Act → The world and the agents change, yet again :)</div>
+  <p><span class="hero-eie-title">Economic Intelligence Engine</span> a live multi-agent macro world where real-world events trigger shocks, agents adapt with learnable policies, and optional LLM-guided strategies shape decisions.</p>
+  <p class="hero-line2">Type a headline → we translate it into economic pressure → the world shifts → agents act under incentives → you see state changes, behaviors, and a clear post-round summary.</p>
+  <div class="mode-pill">Try for yourself?</div>
+</div>
+"""
+        )
+        gr.HTML(
+            """
+<div class="why-matters">
+  <b>Why this matters:</b> Test how stylized institutions and their policies respond to shocks — useful for policy stories, strategy games, and explainable macro reasoning (not forecasting tick data).
 </div>
 """
         )
 
-        with gr.Column(elem_classes=["command-shell"]):
-            preset_events = gr.Dropdown(
-                choices=PRESET_EVENTS,
-                value=PERFECT_DEMO_EVENT,
-                label="Sample events",
+        with gr.Column(elem_classes=["ace-cmd-wrap", "command-shell", "ace-command-pro"]):
+            gr.HTML(
+                '<div class="ace-panel-hd">Event input</div>'
+                "<p class='ace-panel-sub'>You can try one of these to load a template, or add content in the text box on your own the full headline. "
+                "A longer, news-style phrasing (who, what, where) usually gives richer world shifts for the sim.</p>"
             )
-            event_input = gr.Textbox(
-                label=None,
-                value=PERFECT_DEMO_EVENT,
-                lines=1,
-                placeholder="Type an event, e.g. oil crisis hits Middle East",
-            )
-            with gr.Row():
+            with gr.Row(elem_classes=["ace-try-chips", "ace-align-row"]):
+                gr.Markdown("**Quick start**", elem_classes=["trylabel-md"])
+                b_oil = gr.Button("Oil crisis", elem_classes=["demo-quick-btn"])
+                b_war = gr.Button("Trade war", elem_classes=["demo-quick-btn"])
+                b_peace = gr.Button("Peace", elem_classes=["demo-quick-btn"])
+            with gr.Column(elem_classes=["ace-event-input-wrap", "ace-event-ta-wrap"]):
+                event_input = gr.Textbox(
+                    label="",
+                    show_label=False,
+                    value=PERFECT_DEMO_EVENT,
+                    lines=5,
+                    placeholder=(
+                        "Write a full headline, e.g. “Major oil supply disruption in the Middle East, shipping "
+                        "premiums and energy prices spike, institutions brace for market volatility.”"
+                    ),
+                    elem_classes=["ace-event-ta"],
+                )
+            b_oil.click(lambda: DEMO_QUICK_EVENTS["oil_crisis"], outputs=event_input)
+            b_war.click(lambda: DEMO_QUICK_EVENTS["trade_war"], outputs=event_input)
+            b_peace.click(lambda: DEMO_QUICK_EVENTS["peace"], outputs=event_input)
+            gr.HTML('<div class="ace-ctrls-hd">Run &amp; model</div>')
+            with gr.Row(elem_classes=["ace-align-row"]):
                 policy_mode = gr.Radio(
-                    choices=["Agent-Based RL", "LLM-Based RL"],
+                    choices=MODE_CHOICES,
                     value="Agent-Based RL",
                     label="Mode",
                     scale=3,
                 )
                 run_btn = gr.Button("Run →", variant="primary", scale=1)
                 reset_btn = gr.Button("Reset", variant="secondary", scale=1)
-            with gr.Row():
+            with gr.Row(elem_classes=["ace-align-row"]):
                 use_llm = gr.Dropdown(
                     choices=UI_PROVIDER_CHOICES,
-                    value=os.getenv("LLM_PROVIDER", "fallback") if os.getenv("LLM_PROVIDER", "fallback") in UI_PROVIDER_CHOICES else "fallback",
+                    value=default_ui_provider(),
                     label="Provider",
                     scale=1,
                 )
                 model_choice = gr.Textbox(
                     label="Model",
-                    value=os.getenv("GROQ_MODEL", GROQ_MODEL),
-                    placeholder="llama-3.3-70b-versatile",
+                    value=default_model_textbox(),
+                    placeholder="llama-3.3-70b-versatile  ·  or HF model id",
                     scale=2,
                 )
-                debug_llm = gr.Checkbox(label="Debug", value=False, scale=1)
-            gr.HTML('<div class="small-note">Agent-Based RL uses Q-values, trust, memory, and opponent models. LLM-Based RL uses provider/model here and reads keys from environment variables or Hugging Face Space secrets.</div>')
+                debug_llm = gr.Checkbox(
+                    label="LLM log (server only)",
+                    value=False,
+                    scale=1,
+                )
+            gr.HTML(
+                '<div class="ace-footnote">'
+                "<b>Agent-Based RL</b> = learned policies in the sim (no external model call). "
+                "<b>LLM-Based RL</b> = sample several LLM actions, keep the best by reward. "
+                "Set <b>Provider</b> to Groq / Hugging Face / Anthropic (not <code>fallback</code>) with matching API tokens; "
+                "<b>LLM log</b> routes raw text to the server log for debugging only."
+                "</div>"
+            )
+
+        run_status = gr.HTML(render_run_status_html(-1))
+        round_summary = gr.HTML(
+            build_round_summary(make_fresh_env(), None, "Agent-Based RL"),
+        )
+
+        gr.HTML(SOLUTION_PIPELINE_HTML)
 
         flow_strip = gr.HTML(render_flow_strip(make_fresh_env()))
 
-        gr.HTML('<div class="section-title">World State</div>')
+        gr.HTML('<div class="section-title tier-2">World state</div>')
         world_gauges = gr.HTML(render_world_gauges(make_fresh_env()))
 
-        gr.HTML('<div class="section-title">Agents</div>')
+        gr.HTML('<div class="section-title tier-3">Agents</div>')
         agent_cards = gr.HTML()
 
-        with gr.Accordion("AI Reasoning", open=True, elem_classes=["terminal-panel"]):
-            training_samples = gr.Textbox(
-                label="LLM-Based RL sampled strategies",
-                lines=10,
-                interactive=False,
-                value="Switch to LLM-Based RL and run a round to see sampled actions, rewards, advantages, and selected strategy.",
+        with gr.Accordion("Deep Dive (for nerds)", open=True, elem_classes=["terminal-panel"]):
+            gr.HTML(
+                '<div class="small-note">'
+                "Raw state, trust matrix, and tables. "
+                "Agent-Based RL has no model calls; LLM-Based RL uses the provider and model you selected above."
+                "</div>"
             )
-            gr.HTML('<div class="small-note">Multiple strategies are evaluated via reward-based selection on copied environments.</div>')
-
-        with gr.Accordion("System Console", open=True, elem_classes=["terminal-panel"]):
-            gr.HTML('<div class="small-note">Provider/model are selected in the command bar. Agent-Based RL runs without model calls; LLM-Based RL uses the selected model plus env/Space secrets.</div>')
             impact_box = gr.Textbox(label="Immediate Economic Impact", lines=5, interactive=False)
             economic_flow = gr.Textbox(label="Event → Economy → Incentives", lines=6, interactive=False)
             round_prob_bars = gr.Textbox(label="Hidden Round Pressure", lines=6, interactive=False)
@@ -1888,6 +2728,15 @@ def build_ui():
                 label="Detailed reward table",
             )
 
+        with gr.Accordion("LLM-Based RL — sampled actions (traces)", open=True, elem_classes=["terminal-panel"]):
+            training_samples = gr.Textbox(
+                label="Traces",
+                lines=10,
+                interactive=False,
+                value="Run a round in LLM-Based RL mode to see sampled actions, scores, and the best pick.",
+            )
+            gr.HTML('<div class="small-note">Multiple strategies are scored on copied environments; the highest reward wins.</div>')
+
         with gr.Accordion("Training Proof", open=False, elem_classes=["terminal-panel"]):
             gr.HTML('<div class="small-note">Notebook-aligned proof: train agents, compare random vs untrained vs trained, then inspect lift, action shift, and Q-values.</div>')
             phase1_train_btn = gr.Button("Run Phase 1 Training Proof", variant="secondary")
@@ -1940,7 +2789,7 @@ def build_ui():
             probabilities,
             causal_box,
         ]
-        story_outputs = [flow_strip, world_gauges, economic_flow, round_prob_bars]
+        story_outputs = [run_status, round_summary, flow_strip, world_gauges, economic_flow, round_prob_bars]
         sim_outputs = [
             agents_table,
             agent_cards,
@@ -1955,11 +2804,6 @@ def build_ui():
             god_mode,
         ]
 
-        preset_events.change(
-            select_preset_event,
-            inputs=[preset_events],
-            outputs=[event_input],
-        )
         use_llm.change(
             select_provider_model,
             inputs=[use_llm],

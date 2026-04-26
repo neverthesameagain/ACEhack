@@ -103,6 +103,57 @@ That is the whole product philosophy: make the reasoning visible.
 
 A lot of demos will impress you *once*. EIE tries to be interesting *twice*: first when the world shifts, and again when you realize you can follow the full causal chain like a storyboard.
 
+## "Under the Hood: How the System Actually Works"
+
+If the headline is the opening scene, the engine is what makes the plot tighten.
+
+EIE does not “randomize the economy” for drama. It **turns messy language into bounded, structured pressure**—then lets that pressure move through agents who are stubborn, forgetful, trusting, and hungry for payoff. The intelligence is not one oracle. It is the loop: **what the world becomes, what each actor thinks it is, and what they dare to do next.**
+
+### World modeling
+
+The visible economy is a small set of macro-style levers you can read at a glance: **GDP-like growth, inflation, volatility, sector stress**, and the bruises that show up when supply chains, energy, or cooperation start to crack. Under that surface sit quieter forces—**competition, cooperation, and resource limits**—that decide whether the round feels like a knife fight, a treaty table, or a scramble for scarce bandwidth.
+
+Nothing updates as pure noise. Event parsing and world rules **clamp and shape** deltas so the simulation stays interpretable: a wild sentence might still move the needle, but it cannot silently teleport the system into nonsense. The causal spine is intentionally simple to follow:
+
+```text
+Event → Signals → Economic shifts → World state
+```
+
+A headline becomes **signals** (what kind of shock this is), those signals become **shifts** (who gets squeezed, who gets opportunity), and the **world state** is the shared stage everyone has to play on—whether they like the script or not.
+
+### Agent design
+
+Each agent is a small mind with four stubborn habits:
+
+- **Beliefs** — a *partial* picture of what kind of round this is, built from what they can observe. Nobody gets the whole board.
+- **Memory** — what happened last time, and the time before that. History becomes bias, and bias becomes behavior.
+- **Trust** — a living score toward other actors. Trust is not flavor text; it is a channel that opens or closes cooperation.
+- **Incentives** — the role’s real objective function: stability, alpha, survival, reputation, downside protection—pick your poison.
+
+Those four pieces are why the cast feels less like seven sliders and more like seven agendas colliding.
+
+### Action space
+
+Agents do not “vote on a mood.” They take **social-economic moves** the environment understands: **cooperate, compete, form alliances, challenge rivals, and allocate resources** (who gets funded, protected, starved, or prioritized). The action set is how private incentives become public consequences.
+
+### Interactions
+
+Actions are not private daydreams. **What you do lands on someone else’s ledger.** A bid can feel like a flex; an alliance can feel like a life raft; a challenge can feel like a door kicked open. Trust **creeps up or curdles** based on what actually happened—not what anyone claimed would happen.
+
+That is where the theater comes from: **retaliation and cooperation are not scripted outcomes; they are emergent habits** once incentives, memory, and trust start feeding each other.
+
+### Learning
+
+No equations—just the story math everyone already understands from games and markets:
+
+- Agents try actions.
+- The world hands back **rewards** (and social side effects).
+- Strategies **update**: what looked clever stops working; what looked cowardly starts paying.
+
+Over time, the cast **gets sharper at surviving the regime it keeps creating**—which is different from “being right about everything.”
+
+
+
 ## The Seven Agents
 
 EIE has seven agents, each with a different role in the economy:
@@ -171,6 +222,23 @@ We deliberately did not blend these modes into one vague "AI mode." The separati
 
 **No mushy "AI do everything" button.** The demo names what is learning, and which learning is which.
 
+### Agent-Based RL vs LLM-Based RL (two kinds of clever)
+
+Same world. Same agents. Two different ways the system *chooses* the next move.
+
+**Agent-Based RL** is **slow muscle**. Agents learn from **past rewards**, carry **Q-values** and habits forward, and balance **exploration vs exploitation** the classic way: sometimes try a weird move, usually lean on what has paid before. Adaptation is **gradual**—round after round, the policy thickens.
+
+**LLM-Based RL** is **fast imagination**. The model **generates multiple candidate strategies**, the simulator **scores them with the same reward machinery**, and the system **picks the best action now**. It is less “I have slowly learned to love this tactic” and more “here are five futures; this one wins the scoreboard today.”
+
+| | **Agent-Based RL** | **LLM-Based RL** |
+| --- | --- | --- |
+| **What learns** | The agent’s policy over time | The selection process over candidates |
+| **Adaptation** | Gradual, history-shaped | Immediate, compare-and-choose |
+| **Exploration** | Built into the RL policy | Implicit in sampling many strategies |
+| **Best mental image** | Reputation earned in repeated rounds | A bracket of plans, scored like trials |
+
+**The reveal, in one line:** EIE is not pretending the world is perfectly predictable—it is showing you **how structured pressure becomes state, and how state becomes strategy**, whether that strategy is earned slowly or selected sharply.
+
 ## Why Natural Language Matters
 
 The text event system is one of the most important parts of EIE.
@@ -223,25 +291,10 @@ The detailed console is still there, but it is not the first thing the user has 
 
 The UI is meant to feel like watching an economic incident unfold, not filling out a form.
 
-## Training Proof
-
-The notebook and UI both include a training story because "agents learn" should not just be a claim.
-
-The Phase 1 proof trains agents across scenarios, then compares:
-
-- random baseline
-- untrained fallback policy
-- trained agents
-
-It reports reward lift, accuracy lift, cooperation changes, aggression changes, trust changes, action distribution shifts, and learned Q-value evidence.
-
-This is useful because it gives the project a measurable backbone. The demo can be fun and visual, but the training proof shows that repeated interaction changes behavior.
-
-One of the most interesting parts is that the results are not always perfectly flattering. For example, a trained policy can improve reward in an oil crisis while not improving every peace-scenario metric. That is a good thing. It makes the system feel honest. Learning is contextual, and not every objective improves at the same time.
 
 ## OpenEnv and Deployment
 
-EIE is not only a Gradio demo. It also has an OpenEnv-compatible entrypoint:
+EIE is not only a Gradio demo. It has an OpenEnv-compatible entrypoint:
 
 ```text
 openenv.yaml
